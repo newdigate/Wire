@@ -423,6 +423,9 @@ void lpi2c4_isr(void) { Wire2.isr(); }
 PROGMEM
 const TwoWire::I2C_Hardware_t TwoWire::i2c1_hardware = {
 	CCM_CCGR2, CCM_CCGR2_LPI2C1(CCM_CCGR_ON),
+		// pin 18 = GPIO_AD_B1_01 (SDA), pin 19 = GPIO_AD_B1_00 (SCL), ALT3, daisy 1.
+		// On the MIMXRT1060-EVKB these are the Arduino I2C header pins and the bus
+		// shared by the on-board accelerometer, audio codec and camera connector.
 		{{18, 3 | 0x10, &IOMUXC_LPI2C1_SDA_SELECT_INPUT, 1}, {0xff, 0xff, nullptr, 0}},
 		{{19, 3 | 0x10, &IOMUXC_LPI2C1_SCL_SELECT_INPUT, 1}, {0xff, 0xff, nullptr, 0}},
 	IRQ_LPI2C1, &lpi2c1_isr
@@ -432,7 +435,13 @@ TwoWire Wire(IMXRT_LPI2C1_ADDRESS, TwoWire::i2c1_hardware);
 PROGMEM
 const TwoWire::I2C_Hardware_t TwoWire::i2c3_hardware = {
 	CCM_CCGR2, CCM_CCGR2_LPI2C3(CCM_CCGR_ON),
-#if defined(ARDUINO_TEENSY41)
+#if defined(ARDUINO_MIMXRT1060_EVKB)
+		// EVKB: LPI2C3 on GPIO_AD_B1_06 (SDA = pin 1) / GPIO_AD_B1_07 (SCL = pin 0),
+		// ALT1, input daisy 2.  Not wired to an on-board device; these pads are the
+		// Arduino D1/D0 header pins (shared with a UART).  No alternate pin option.
+		{{1, 1 | 0x10, &IOMUXC_LPI2C3_SDA_SELECT_INPUT, 2}, {0xff, 0xff, nullptr, 0}},
+		{{0, 1 | 0x10, &IOMUXC_LPI2C3_SCL_SELECT_INPUT, 2}, {0xff, 0xff, nullptr, 0}},
+#elif defined(ARDUINO_TEENSY41)
 		{{17, 1 | 0x10, &IOMUXC_LPI2C3_SDA_SELECT_INPUT, 2}, {44, 2 | 0x10, &IOMUXC_LPI2C3_SDA_SELECT_INPUT, 1}},
 		{{16, 1 | 0x10, &IOMUXC_LPI2C3_SCL_SELECT_INPUT, 2}, {45, 2 | 0x10, &IOMUXC_LPI2C3_SCL_SELECT_INPUT, 1}},
 #else  // T4 and ARDUINO_TEENSY_MICROMOD
@@ -446,8 +455,16 @@ const TwoWire::I2C_Hardware_t TwoWire::i2c3_hardware = {
 PROGMEM
 const TwoWire::I2C_Hardware_t TwoWire::i2c4_hardware = {
 	CCM_CCGR6, CCM_CCGR6_LPI2C4_SERIAL(CCM_CCGR_ON),
+#if defined(ARDUINO_MIMXRT1060_EVKB)
+		// EVKB: LPI2C4 on GPIO_AD_B0_13 (SDA = pin 22) / GPIO_AD_B0_12 (SCL = pin 21),
+		// ALT0, input daisy 1.  Not wired to an on-board device; these pads are
+		// shared with Serial6 (LPUART1), so Wire2 and Serial6 are mutually exclusive.
+		{{22, 0 | 0x10, &IOMUXC_LPI2C4_SDA_SELECT_INPUT, 1}, {0xff, 0xff, nullptr, 0}},
+		{{21, 0 | 0x10, &IOMUXC_LPI2C4_SCL_SELECT_INPUT, 1}, {0xff, 0xff, nullptr, 0}},
+#else
 		{{25, 0 | 0x10, &IOMUXC_LPI2C4_SDA_SELECT_INPUT, 1}, {0xff, 0xff, nullptr, 0}},
 		{{24, 0 | 0x10, &IOMUXC_LPI2C4_SCL_SELECT_INPUT, 1}, {0xff, 0xff, nullptr, 0}},
+#endif
 	IRQ_LPI2C4, &lpi2c4_isr
 };
 //TwoWire Wire2(&IMXRT_LPI2C4, TwoWire::i2c4_hardware);
