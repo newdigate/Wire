@@ -25,6 +25,9 @@
 #if defined(__IMXRT1052__) || defined(__IMXRT1062__)
 #include "WireIMXRT.h"
 
+#elif defined(__IMXRT1176__)
+#include "WireIMXRT1176.h"
+
 #elif defined(__arm__) && defined(TEENSYDUINO)
 #include "WireKinetis.h"
 
