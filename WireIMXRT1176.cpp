@@ -34,26 +34,22 @@
 
 #include <string.h>
 
-// MSR flags (imxrt_lpi2c.c contract)
-#define MSR_TDF  (1u<<0)
-#define MSR_RDF  (1u<<1)
-#define MSR_EPF  (1u<<8)
-#define MSR_SDF  (1u<<9)
-#define MSR_NDF  (1u<<10)
-#define MSR_ALF  (1u<<11)
-#define MSR_FEF  (1u<<12)
-// MCR flags
-#define MCR_MEN  (1u<<0)
-#define MCR_RST  (1u<<1)
-#define MCR_RTF  (1u<<8)
-#define MCR_RRF  (1u<<9)
-// MTDR commands (data in [7:0], cmd in [10:8])
-#define TX_CMD(cmd, data)  (((uint32_t)(cmd) << 8) | ((data) & 0xFF))
-#define CMD_TXD    0u
-#define CMD_RXD    1u
-#define CMD_STOP   2u
-#define CMD_START  4u
-#define MRDR_RXEMPTY (1u<<14)
+// Master-path register logic + bit macros now live ONCE in the shared C core
+// lpi2c1176.{h,c} (Phase 3.3) — consumed by this class (addresses from
+// imxrt1176.h via hardware.hw) and by the CM4 gate images (same addresses as
+// literals). This file keeps the Arduino API surface, buffers, and the
+// CM7-only slave block (SCR/SSR/NVIC/ISR below).
+
+#include <stddef.h>
+
+// The shared C core's master overlay must equal the core header's.
+static_assert(offsetof(lpi2c1176_regs_t, MCR)    == offsetof(IMXRT_LPI2C_t, MCR),    "MCR");
+static_assert(offsetof(lpi2c1176_regs_t, MSR)    == offsetof(IMXRT_LPI2C_t, MSR),    "MSR");
+static_assert(offsetof(lpi2c1176_regs_t, MCFGR1) == offsetof(IMXRT_LPI2C_t, MCFGR1), "MCFGR1");
+static_assert(offsetof(lpi2c1176_regs_t, MCCR0)  == offsetof(IMXRT_LPI2C_t, MCCR0),  "MCCR0");
+static_assert(offsetof(lpi2c1176_regs_t, MTDR)   == offsetof(IMXRT_LPI2C_t, MTDR),   "MTDR");
+static_assert(offsetof(lpi2c1176_regs_t, MRDR)   == offsetof(IMXRT_LPI2C_t, MRDR),   "MRDR");
+
 // Slave register bits
 #define SCR_SEN  (1u<<0)
 #define SCR_RST  (1u<<1)
@@ -70,31 +66,16 @@
 #define SIER_BEIE (1u<<10)
 #define SIER_FEIE (1u<<11)
 
-#define WIRE_TIMEOUT 100000u
-
 void TwoWire::begin() {
-	hardware.lpcg = 1u;                                    // ungate LPI2C clock
-	hardware.clock_root = hardware.clock_root_val;         // 24 MHz functional clock
-	hardware.scl_mux = hardware.scl_mux_val;  hardware.scl_pad = hardware.pad_ctl_val;
-	hardware.sda_mux = hardware.sda_mux_val;  hardware.sda_pad = hardware.pad_ctl_val;
-	hardware.scl_select_input = hardware.scl_select_val;
-	hardware.sda_select_input = hardware.sda_select_val;
-	port().MCR = MCR_RST;                                  // reset the master block
-	port().MCR = 0u;
-	setClock(clock_hz);                                    // program MCCR0/MCFGR1
-	port().MCR = MCR_MEN;                                  // enable
+	lpi2c1176_begin(mp(), &hardware.hw, clock_hz);
 }
 
-void TwoWire::end() { port().MCR = 0u; hardware.lpcg = 0u; }
+void TwoWire::end() { lpi2c1176_end(mp(), &hardware.hw); }
 
 void TwoWire::begin(uint8_t address) {
 	is_slave = true; slave_addr = address;
 	s_rx_len = 0; s_rx_idx = 0; s_tx_len = 0; s_tx_idx = 0;
-	hardware.lpcg = 1u; hardware.clock_root = hardware.clock_root_val;
-	hardware.scl_mux = hardware.scl_mux_val;  hardware.scl_pad = hardware.pad_ctl_val;
-	hardware.sda_mux = hardware.sda_mux_val;  hardware.sda_pad = hardware.pad_ctl_val;
-	hardware.scl_select_input = hardware.scl_select_val;
-	hardware.sda_select_input = hardware.sda_select_val;
+	lpi2c1176_clocks_pins(&hardware.hw);
 	port().SCR = SCR_RST; port().SCR = 0u;
 	port().SAMR = ((uint32_t)address << 1);
 	// SAEN (7-bit address) | RXSTALL (bit1) | TXDSTALL (bit2): clock-stretch until the
@@ -149,35 +130,7 @@ void TwoWire::handle_slave_isr() {
 
 void TwoWire::setClock(uint32_t freq) {
 	clock_hz = freq;
-	const uint32_t src = 24000000u;
-	uint32_t pre = 0, div = 0;
-	for (pre = 0; pre < 8u; pre++) { div = (src >> pre) / freq; if (div <= 120u) break; }
-	uint32_t clklo = (div * 6u) / 10u;                // ~60% low time (I2C tLOW>tHIGH)
-	uint32_t clkhi = (div > clklo) ? (div - clklo) : 1u;
-	if (clklo > 63u) clklo = 63u;
-	if (clkhi > 63u) clkhi = 63u; if (clkhi < 1u) clkhi = 1u;
-	uint32_t men = port().MCR & MCR_MEN;
-	port().MCR = men & ~MCR_MEN;                       // MCCR/MCFGR need MEN=0
-	port().MCFGR1 = (port().MCFGR1 & ~0x7u) | (pre & 0x7u);
-	port().MCCR0 = (clklo) | (clkhi << 8) | ((clkhi/2u) << 16) | ((clkhi/2u) << 24);
-	if (men) port().MCR = MCR_MEN;
-}
-
-// Wait until any bit in `mask` is set, or an error bit appears / timeout.
-// Returns true on success. On error/timeout sets err to a nonzero Arduino status.
-bool TwoWire::wait_flag(uint32_t mask, uint32_t error_mask, uint32_t &err) {
-	for (uint32_t g = 0; g < WIRE_TIMEOUT; g++) {
-		uint32_t s = port().MSR;
-		if (s & error_mask) {
-			if (s & MSR_NDF) err = (err == 0xFFu) ? 2u : 3u; // addr vs data NACK
-			else err = 4u;                                    // ALF/FEF/other
-			port().MSR = s;                                   // W1C the flags
-			return false;
-		}
-		if (s & mask) return true;
-	}
-	err = 5u;                                                 // timeout
-	return false;
+	lpi2c1176_set_clock(mp(), freq);
 }
 
 size_t TwoWire::write(uint8_t data) {
@@ -189,57 +142,18 @@ size_t TwoWire::write(const uint8_t *data, size_t len) {
 	size_t n = 0; while (n < len && write(data[n])) n++; return n;
 }
 
-// After a NACK/error, flush the TX/RX FIFOs so the next transaction starts
-// clean (essential when scanning many addresses back-to-back).
-void TwoWire::bus_recover() {
-	port().MCR = MCR_MEN | MCR_RTF | MCR_RRF;   // reset TX+RX FIFOs, stay enabled
-	port().MCR = MCR_MEN;
-	port().MSR = port().MSR;                     // W1C any latched flags
-}
-
+// The ACK/NACK-at-STOP judgement and the post-NACK FIFO flush live in the
+// shared core (lpi2c1176_master_write / lpi2c1176_bus_recover).
 uint8_t TwoWire::endTransmission(uint8_t sendStop) {
-	uint32_t err = 0xFFu;                                     // 0xFF => a NACK now is an address NACK (2)
-	port().MSR = port().MSR;                                  // clear stale flags
-	port().MTDR = TX_CMD(CMD_START, (tx_addr << 1) | 0u);     // START + addr(W)
-	// IMPORTANT: do NOT treat TDF here as "address ACKed". TDF (TX-FIFO ready)
-	// asserts a byte-time BEFORE the ACK bit is sampled on silicon, so racing it
-	// against NDF makes every address look ACKed (breaks bus scanning). The ACK/
-	// NACK is judged at completion (STOP) below, matching the NXP SDK.
-	for (uint8_t i = 0; i < tx_len; i++) {
-		if (!wait_flag(MSR_TDF, MSR_NDF | MSR_ALF | MSR_FEF, err)) { bus_recover(); tx_len = 0; return (uint8_t)err; }
-		err = 0u;                                             // past the address; a NACK now is a data NACK (3)
-		port().MTDR = TX_CMD(CMD_TXD, tx_buf[i]);
-	}
-	if (sendStop) {
-		port().MTDR = TX_CMD(CMD_STOP, 0);
-		// Completion is the correct point to judge ACK/NACK -- watch NDF here.
-		if (!wait_flag(MSR_SDF, MSR_NDF | MSR_ALF | MSR_FEF, err)) { bus_recover(); tx_len = 0; return (uint8_t)err; }
-		port().MSR = MSR_SDF | MSR_EPF;
-	}
+	uint8_t r = (uint8_t)lpi2c1176_master_write(mp(), tx_addr, tx_buf, tx_len, sendStop);
 	tx_len = 0;
-	return 0u;
+	return r;
 }
 
 uint8_t TwoWire::requestFrom(uint8_t address, uint8_t quantity, uint8_t sendStop) {
 	if (quantity > BUFFER_LENGTH) quantity = BUFFER_LENGTH;
-	rx_len = 0; rx_idx = 0;
-	uint32_t err = 0xFFu;
-	port().MSR = port().MSR;
-	port().MTDR = TX_CMD(CMD_START, (address << 1) | 1u);     // START + addr(R)
-	if (!wait_flag(MSR_TDF, MSR_NDF | MSR_ALF | MSR_FEF, err)) { if (sendStop) port().MTDR = TX_CMD(CMD_STOP,0); return 0; }
-	port().MTDR = TX_CMD(CMD_RXD, (uint8_t)(quantity - 1));   // receive `quantity` bytes (N-1 encoding)
-	for (uint8_t i = 0; i < quantity; i++) {
-		err = 0u;
-		if (!wait_flag(MSR_RDF, MSR_ALF | MSR_FEF, err)) break;
-		uint32_t r = port().MRDR;
-		if (r & MRDR_RXEMPTY) break;
-		rx_buf[rx_len++] = (uint8_t)(r & 0xFF);
-	}
-	if (sendStop) {
-		port().MTDR = TX_CMD(CMD_STOP, 0);
-		wait_flag(MSR_SDF, MSR_ALF | MSR_FEF, err);
-		port().MSR = MSR_SDF | MSR_EPF;
-	}
+	rx_idx = 0;
+	rx_len = (uint8_t)lpi2c1176_master_read(mp(), address, rx_buf, quantity, sendStop);
 	return rx_len;
 }
 
@@ -263,26 +177,26 @@ static void wire2_isr();
 // ALT1|SION (0x11). Pad 0x1E = ODE|DSE|PUE|PUS (internal pull-up). CLOCK_ROOT37
 // (24 MHz) / LPCG98. Values verbatim from the HW-verified Wire_instances.cpp.
 const TwoWire::I2C_Hardware_t TwoWire::lpi2c1_hardware = {
-	/* lpcg */ CCM_LPCG98_DIRECT,
-	/* clock_root */ CCM_CLOCK_ROOT37_CONTROL, /* clock_root_val */ 0u,
-	/* scl */ IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_08, 0x11u, IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_08,
-	/* sda */ IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_09, 0x11u, IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_09,
-	/* scl_select */ IOMUXC_LPI2C1_SCL_SELECT_INPUT, 0u,
-	/* sda_select */ IOMUXC_LPI2C1_SDA_SELECT_INPUT, 0u,
-	/* pad_ctl_val */ 0x0000001Eu,
+	{ /* lpcg */ &CCM_LPCG98_DIRECT,
+	  /* clock_root */ &CCM_CLOCK_ROOT37_CONTROL, /* clock_root_val */ 0u,
+	  /* scl */ &IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_08, 0x11u, &IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_08,
+	  /* sda */ &IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_09, 0x11u, &IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_09,
+	  /* scl_select */ &IOMUXC_LPI2C1_SCL_SELECT_INPUT, 0u,
+	  /* sda_select */ &IOMUXC_LPI2C1_SDA_SELECT_INPUT, 0u,
+	  /* pad_ctl_val */ 0x0000001Eu },
 	/* irq */ IRQ_LPI2C1, /* irq_function */ wire_isr, /* irq_priority */ 16u,
 };
 
 // LPI2C2: QEMU-loopback slave persona only (no physical EVKB pins). Pin refs
 // bind to LPI2C1's IOMUXC regs (inert in QEMU). CLOCK_ROOT38 / LPCG99.
 const TwoWire::I2C_Hardware_t TwoWire::lpi2c2_hardware = {
-	/* lpcg */ CCM_LPCG99_DIRECT,
-	/* clock_root */ CCM_CLOCK_ROOT38_CONTROL, /* clock_root_val */ 0u,
-	/* scl */ IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_08, 0x11u, IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_08,
-	/* sda */ IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_09, 0x11u, IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_09,
-	/* scl_select */ IOMUXC_LPI2C1_SCL_SELECT_INPUT, 0u,
-	/* sda_select */ IOMUXC_LPI2C1_SDA_SELECT_INPUT, 0u,
-	/* pad_ctl_val */ 0x0000001Eu,
+	{ /* lpcg */ &CCM_LPCG99_DIRECT,
+	  /* clock_root */ &CCM_CLOCK_ROOT38_CONTROL, /* clock_root_val */ 0u,
+	  /* scl */ &IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_08, 0x11u, &IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_08,
+	  /* sda */ &IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_09, 0x11u, &IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_09,
+	  /* scl_select */ &IOMUXC_LPI2C1_SCL_SELECT_INPUT, 0u,
+	  /* sda_select */ &IOMUXC_LPI2C1_SDA_SELECT_INPUT, 0u,
+	  /* pad_ctl_val */ 0x0000001Eu },
 	/* irq */ IRQ_LPI2C2, /* irq_function */ wire1_isr, /* irq_priority */ 16u,
 };
 
@@ -290,13 +204,13 @@ const TwoWire::I2C_Hardware_t TwoWire::lpi2c2_hardware = {
 // GPIO_LPSR_04 (SDA), ALT0|SION (0x10). LPSR-domain pad 0x0A. CLOCK_ROOT41
 // (mux 1) / LPCG102.
 const TwoWire::I2C_Hardware_t TwoWire::lpi2c5_hardware = {
-	/* lpcg */ CCM_LPCG102_DIRECT,
-	/* clock_root */ CCM_CLOCK_ROOT41_CONTROL, /* clock_root_val */ (1u << 8),
-	/* scl */ IOMUXC_SW_MUX_CTL_PAD_GPIO_LPSR_05, 0x10u, IOMUXC_SW_PAD_CTL_PAD_GPIO_LPSR_05,
-	/* sda */ IOMUXC_SW_MUX_CTL_PAD_GPIO_LPSR_04, 0x10u, IOMUXC_SW_PAD_CTL_PAD_GPIO_LPSR_04,
-	/* scl_select */ IOMUXC_LPI2C5_SCL_SELECT_INPUT, 0u,
-	/* sda_select */ IOMUXC_LPI2C5_SDA_SELECT_INPUT, 0u,
-	/* pad_ctl_val */ 0x0000000Au,
+	{ /* lpcg */ &CCM_LPCG102_DIRECT,
+	  /* clock_root */ &CCM_CLOCK_ROOT41_CONTROL, /* clock_root_val */ (1u << 8),
+	  /* scl */ &IOMUXC_SW_MUX_CTL_PAD_GPIO_LPSR_05, 0x10u, &IOMUXC_SW_PAD_CTL_PAD_GPIO_LPSR_05,
+	  /* sda */ &IOMUXC_SW_MUX_CTL_PAD_GPIO_LPSR_04, 0x10u, &IOMUXC_SW_PAD_CTL_PAD_GPIO_LPSR_04,
+	  /* scl_select */ &IOMUXC_LPI2C5_SCL_SELECT_INPUT, 0u,
+	  /* sda_select */ &IOMUXC_LPI2C5_SDA_SELECT_INPUT, 0u,
+	  /* pad_ctl_val */ 0x0000000Au },
 	/* irq */ IRQ_LPI2C5, /* irq_function */ wire2_isr, /* irq_priority */ 16u,
 };
 

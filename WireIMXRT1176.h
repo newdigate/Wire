@@ -39,6 +39,7 @@
 #include "imxrt1176.h"
 #include "core_pins.h"   // IRQ_NUMBER_t, attachInterruptVector, NVIC_*
 #include "Stream.h"
+#include "lpi2c1176.h"
 
 #define BUFFER_LENGTH 32
 #define WIRE_HAS_END 1
@@ -48,18 +49,10 @@
 
 class TwoWire : public Stream {
 public:
-	// Hardware description: clock gate + clock root + the SCL/SDA pad config
-	// and the IRQ. Registers themselves are reached through port() over the
-	// IMXRT_LPI2C_t overlay, so no per-register refs live here.
+	// Hardware description: the shared C core's desc (clock gate + clock root
+	// + SCL/SDA pad config, lpi2c1176.h) plus the CM7-only IRQ binding.
 	typedef struct {
-		volatile uint32_t &lpcg;                 // CCM->LPCG[n].DIRECT (write 1 to ungate)
-		volatile uint32_t &clock_root;           // CCM->CLOCK_ROOT[n].CONTROL
-		uint32_t clock_root_val;                 // 0 => 24 MHz (OscRC48MDiv2)
-		volatile uint32_t &scl_mux;  uint32_t scl_mux_val;  volatile uint32_t &scl_pad;
-		volatile uint32_t &sda_mux;  uint32_t sda_mux_val;  volatile uint32_t &sda_pad;
-		volatile uint32_t &scl_select_input; uint32_t scl_select_val;
-		volatile uint32_t &sda_select_input; uint32_t sda_select_val;
-		uint32_t pad_ctl_val;                    // open-drain pad config
+		lpi2c1176_hw_t hw;                       // shared C core hardware desc
 		IRQ_NUMBER_t irq;
 		void (*irq_function)(void);
 		uint16_t irq_priority;
@@ -133,6 +126,7 @@ public:
 	IMXRT_LPI2C_t & port() { return *(IMXRT_LPI2C_t *)port_addr; }
 
 private:
+	lpi2c1176_regs_t *mp() { return (lpi2c1176_regs_t *)port_addr; }
 	uintptr_t port_addr;
 	const I2C_Hardware_t &hardware;
 
@@ -156,8 +150,6 @@ private:
 	uint8_t s_tx_len = 0;
 	uint8_t s_tx_idx = 0;
 
-	bool wait_flag(uint32_t mask, uint32_t error_mask, uint32_t &err);
-	void bus_recover();
 };
 
 extern TwoWire Wire;
