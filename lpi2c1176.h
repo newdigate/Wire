@@ -4,8 +4,9 @@
  * re-expressed as the single shared C core (Phase 3.3). Consumed by BOTH the
  * CM7 TwoWire class (which passes register addresses from imxrt1176.h) and
  * the bare-metal CM4 gate images (which pass the same addresses as literals)
- * — ending the CM7/CM4 keep-in-sync sequence duplication. Master path only:
- * the slave block (SCR/SSR/NVIC/ISR) is CM7-only and stays in the class.
+ * — ending the CM7/CM4 keep-in-sync sequence duplication. Hosts the master
+ * paths and (Phase 4.2) the shared slave init (slave_config/slave_enable);
+ * the slave ISR bodies stay per-consumer (CM7 class ISR / CM4 gate ISR).
  * Freestanding C11: compiles under the CM4 image flags (-ffreestanding, no
  * core headers) and inside the C++ library.
  *
@@ -44,9 +45,10 @@ extern "C" {
 #define LPI2C1176_ASSERT(c, m) _Static_assert(c, m)
 #endif
 
-/* LPI2C master register-block overlay (offsets per RT1170 RM; equals the
- * master block of the core's IMXRT_LPI2C_t — cross-asserted in
- * WireIMXRT1176.cpp. The slave block stays on IMXRT_LPI2C_t: CM7-only). */
+/* LPI2C register-block overlay, master + slave (offsets per RT1170 RM
+ * ch.69; equals the core's HW-verified IMXRT_LPI2C_t — the master block is
+ * cross-asserted in WireIMXRT1176.cpp, the slave block against the RM
+ * offsets below). */
 typedef struct {
 	volatile uint32_t VERID;        /* 0x00 */
 	volatile uint32_t PARAM;        /* 0x04 */
@@ -71,6 +73,23 @@ typedef struct {
 	volatile uint32_t MTDR;         /* 0x60 */
 	volatile uint32_t r64[3];
 	volatile uint32_t MRDR;         /* 0x70 */
+	volatile uint32_t r74[39];      /* 0x74..0x10C */
+	volatile uint32_t SCR;          /* 0x110 slave control */
+	volatile uint32_t SSR;          /* 0x114 slave status */
+	volatile uint32_t SIER;         /* 0x118 slave interrupt enable */
+	volatile uint32_t SDER;         /* 0x11C slave DMA enable */
+	volatile uint32_t r120;         /* 0x120 */
+	volatile uint32_t SCFGR1;       /* 0x124 slave config 1 */
+	volatile uint32_t SCFGR2;       /* 0x128 slave config 2 */
+	volatile uint32_t r12C[5];      /* 0x12C..0x13C */
+	volatile uint32_t SAMR;         /* 0x140 slave address match */
+	volatile uint32_t r144[3];      /* 0x144..0x14C */
+	volatile uint32_t SASR;         /* 0x150 slave address status (read clears AVF) */
+	volatile uint32_t STAR;         /* 0x154 slave transmit ACK */
+	volatile uint32_t r158[2];      /* 0x158..0x15C */
+	volatile uint32_t STDR;         /* 0x160 slave transmit data */
+	volatile uint32_t r164[3];      /* 0x164..0x16C */
+	volatile uint32_t SRDR;         /* 0x170 slave receive data */
 } lpi2c1176_regs_t;
 
 LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, MCR)    == 0x10, "LPI2C MCR");
@@ -79,6 +98,12 @@ LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, MCFGR1) == 0x24, "LPI2C MCFGR1");
 LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, MCCR0)  == 0x48, "LPI2C MCCR0");
 LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, MTDR)   == 0x60, "LPI2C MTDR");
 LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, MRDR)   == 0x70, "LPI2C MRDR");
+LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, SCR)    == 0x110, "LPI2C SCR");
+LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, SCFGR1) == 0x124, "LPI2C SCFGR1");
+LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, SAMR)   == 0x140, "LPI2C SAMR");
+LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, SASR)   == 0x150, "LPI2C SASR");
+LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, STDR)   == 0x160, "LPI2C STDR");
+LPI2C1176_ASSERT(offsetof(lpi2c1176_regs_t, SRDR)   == 0x170, "LPI2C SRDR");
 
 /* Hardware description: CCM gate/root + SCL/SDA pads. */
 typedef struct {
@@ -105,6 +130,23 @@ typedef struct {
 #define LPI2C1176_MSR_NDF   (1u << 10)
 #define LPI2C1176_MSR_ALF   (1u << 11)
 #define LPI2C1176_MSR_FEF   (1u << 12)
+/* SCR */
+#define LPI2C1176_SCR_SEN     (1u << 0)
+#define LPI2C1176_SCR_RST     (1u << 1)
+#define LPI2C1176_SCR_FILTEN  (1u << 4)
+/* SSR (SIER mirrors these bit positions) */
+#define LPI2C1176_SSR_TDF     (1u << 0)
+#define LPI2C1176_SSR_RDF     (1u << 1)
+#define LPI2C1176_SSR_AVF     (1u << 2)
+#define LPI2C1176_SSR_SDF     (1u << 9)
+#define LPI2C1176_SSR_BEF     (1u << 10)
+#define LPI2C1176_SSR_FEF     (1u << 11)
+#define LPI2C1176_SIER_TDIE   LPI2C1176_SSR_TDF
+#define LPI2C1176_SIER_RDIE   LPI2C1176_SSR_RDF
+#define LPI2C1176_SIER_AVIE   LPI2C1176_SSR_AVF
+#define LPI2C1176_SIER_SDIE   LPI2C1176_SSR_SDF
+#define LPI2C1176_SIER_BEIE   LPI2C1176_SSR_BEF
+#define LPI2C1176_SIER_FEIE   LPI2C1176_SSR_FEF
 /* MTDR commands (data in [7:0], cmd in [10:8]) */
 #define LPI2C1176_TX_CMD(cmd, data)  (((uint32_t)(cmd) << 8) | ((data) & 0xFFu))
 #define LPI2C1176_CMD_TXD    0u
@@ -139,6 +181,14 @@ uint32_t lpi2c1176_master_write(lpi2c1176_regs_t *p, uint8_t addr,
  * RDF wait, optional STOP. Returns bytes read. */
 uint32_t lpi2c1176_master_read(lpi2c1176_regs_t *p, uint8_t addr,
                               uint8_t *dst, uint32_t quantity, int send_stop);
+/* Slave init through SIER (clocks/pins + reset + address + stall config +
+ * interrupt arm) — everything except the NVIC hookup and the final enable,
+ * which each consumer sequences itself (CM7: attachInterruptVector/NVIC;
+ * CM4: NVIC_ISER1) so the HW-verified register order is preserved. */
+void lpi2c1176_slave_config(lpi2c1176_regs_t *p, const lpi2c1176_hw_t *hw,
+                            uint8_t address);
+/* Final SCR = SEN | FILTEN — call AFTER the consumer's NVIC enable. */
+void lpi2c1176_slave_enable(lpi2c1176_regs_t *p);
 
 #if defined(__cplusplus)
 }

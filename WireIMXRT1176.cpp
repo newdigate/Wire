@@ -34,11 +34,11 @@
 
 #include <string.h>
 
-// Master-path register logic + bit macros now live ONCE in the shared C core
-// lpi2c1176.{h,c} (Phase 3.3) — consumed by this class (addresses from
-// imxrt1176.h via hardware.hw) and by the CM4 gate images (same addresses as
-// literals). This file keeps the Arduino API surface, buffers, and the
-// CM7-only slave block (SCR/SSR/NVIC/ISR below).
+// Register logic + bit macros live ONCE in the shared C core lpi2c1176.{h,c}
+// (master paths Phase 3.3, slave init Phase 4.2) — consumed by this class
+// (addresses from imxrt1176.h via hardware.hw) and by the CM4 gate images
+// (same addresses as literals). This file keeps the Arduino API surface,
+// buffers, the NVIC hookup, and the CM7 slave ISR body below.
 
 #include <stddef.h>
 
@@ -50,22 +50,6 @@ static_assert(offsetof(lpi2c1176_regs_t, MCCR0)  == offsetof(IMXRT_LPI2C_t, MCCR
 static_assert(offsetof(lpi2c1176_regs_t, MTDR)   == offsetof(IMXRT_LPI2C_t, MTDR),   "MTDR");
 static_assert(offsetof(lpi2c1176_regs_t, MRDR)   == offsetof(IMXRT_LPI2C_t, MRDR),   "MRDR");
 
-// Slave register bits
-#define SCR_SEN  (1u<<0)
-#define SCR_RST  (1u<<1)
-#define SSR_TDF  (1u<<0)
-#define SSR_RDF  (1u<<1)
-#define SSR_AVF  (1u<<2)
-#define SSR_SDF  (1u<<9)
-#define SSR_BEF  (1u<<10)
-#define SSR_FEF  (1u<<11)
-#define SIER_TDIE (1u<<0)
-#define SIER_RDIE (1u<<1)
-#define SIER_AVIE (1u<<2)
-#define SIER_SDIE (1u<<9)
-#define SIER_BEIE (1u<<10)
-#define SIER_FEIE (1u<<11)
-
 void TwoWire::begin() {
 	lpi2c1176_begin(mp(), &hardware.hw, clock_hz);
 }
@@ -75,30 +59,11 @@ void TwoWire::end() { lpi2c1176_end(mp(), &hardware.hw); }
 void TwoWire::begin(uint8_t address) {
 	is_slave = true; slave_addr = address;
 	s_rx_len = 0; s_rx_idx = 0; s_tx_len = 0; s_tx_idx = 0;
-	lpi2c1176_clocks_pins(&hardware.hw);
-	port().SCR = SCR_RST; port().SCR = 0u;
-	port().SAMR = ((uint32_t)address << 1);
-	// SAEN (7-bit address) | RXSTALL (bit1) | TXDSTALL (bit2): clock-stretch until the
-	// ISR drains SRDR / fills STDR, so multi-byte reads/writes stay byte-correct even
-	// when the master clocks faster than the ISR can refill.
-	port().SCFGR1 = (1u << 9) | (1u << 2) | (1u << 1);          // SAEN | TXDSTALL | RXSTALL (SDK default)
-	// SCFGR2.CLKHOLD (bits[3:0]) sets the SCL hold time while stalling — MUST be
-	// non-zero or TXDSTALL/RXSTALL never actually hold the clock, so the ISR can't
-	// refill STDR/drain SRDR in time on multi-byte transfers. Max hold; the 996 MHz
-	// ISR refills well within it. (Matches the SDK's clockHoldTime default.)
-	port().SCFGR2 = 0x0000000Fu;
-	// TDIE is essential: without it only the first read byte (which rides the AVF
-	// interrupt) is served; bytes 2..N need a TDF interrupt each to refill STDR.
-	// BEIE|FEIE are essential for recovery: a multi-byte-read glitch can latch
-	// FEF (TX underrun) / BEF, which corrupts the slave FIFO and eventually wedges
-	// it into permanent address-NACK. These interrupts fire the ISR to W1C the
-	// error so the *next* transfer recovers cleanly (matches the SDK's IRQ handler,
-	// which clears BitErr/FifoErr on every interrupt).
-	port().SIER = SIER_TDIE | SIER_RDIE | SIER_AVIE | SIER_SDIE | SIER_BEIE | SIER_FEIE;
+	lpi2c1176_slave_config(mp(), &hardware.hw, address);
 	attachInterruptVector(hardware.irq, hardware.irq_function);
 	NVIC_SET_PRIORITY(hardware.irq, hardware.irq_priority);
 	NVIC_ENABLE_IRQ(hardware.irq);
-	port().SCR = SCR_SEN | (1u << 4);   // SEN | FILTEN (SDK default)
+	lpi2c1176_slave_enable(mp());
 }
 
 // Runs from ITCM (.fastrun): the slave ISR must refill STDR within the bounded
@@ -106,23 +71,23 @@ void TwoWire::begin(uint8_t address) {
 __attribute__((section(".fastrun")))
 void TwoWire::handle_slave_isr() {
 	uint32_t ssr = port().SSR;
-	if (ssr & (SSR_BEF | SSR_FEF)) {              // latched slave error -> W1C + re-arm
-		port().SSR = (SSR_BEF | SSR_FEF);        // clear so the slave FIFO recovers
+	if (ssr & (LPI2C1176_SSR_BEF | LPI2C1176_SSR_FEF)) {          // latched slave error -> W1C + re-arm
+		port().SSR = (LPI2C1176_SSR_BEF | LPI2C1176_SSR_FEF);    // clear so the slave FIFO recovers
 		s_rx_len = 0; s_rx_idx = 0; s_tx_idx = 0; s_tx_len = 0;
 	}
-	if (ssr & SSR_AVF) { volatile uint32_t sasr = port().SASR; (void)sasr; s_rx_len = 0; s_rx_idx = 0; }   // new transfer (read of SASR clears AVF)
-	if (ssr & SSR_RDF) {                                                 // master wrote a byte
+	if (ssr & LPI2C1176_SSR_AVF) { volatile uint32_t sasr = port().SASR; (void)sasr; s_rx_len = 0; s_rx_idx = 0; }   // new transfer (read of SASR clears AVF)
+	if (ssr & LPI2C1176_SSR_RDF) {                                       // master wrote a byte
 		uint8_t d = (uint8_t)port().SRDR;
 		if (s_rx_len < BUFFER_LENGTH) s_rx_buf[s_rx_len++] = d;
 	}
-	if (ssr & SSR_TDF) {                                                 // master wants a byte (TXDSTALL holds SCL until we write STDR)
+	if (ssr & LPI2C1176_SSR_TDF) {                                       // master wants a byte (TXDSTALL holds SCL until we write STDR)
 		if (s_tx_idx == 0 && on_request) {
 			s_tx_len = 0; in_slave_request = true; on_request(); in_slave_request = false;
 		}
 		port().STDR = (s_tx_idx < s_tx_len) ? s_tx_buf[s_tx_idx++] : 0xFFu;
 	}
-	if (ssr & SSR_SDF) {                                                 // STOP -> transfer done
-		port().SSR = SSR_SDF;                                            // W1C
+	if (ssr & LPI2C1176_SSR_SDF) {                                       // STOP -> transfer done
+		port().SSR = LPI2C1176_SSR_SDF;                                  // W1C
 		if (s_rx_len && on_receive) { s_rx_idx = 0; on_receive(s_rx_len); }
 		s_rx_len = 0; s_rx_idx = 0; s_tx_idx = 0; s_tx_len = 0;
 	}

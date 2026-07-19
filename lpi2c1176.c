@@ -3,8 +3,10 @@
  * This project's HW-verified RT1176 LPI2C bring-up (WireIMXRT1176.cpp, MIT),
  * re-expressed as the single shared C core (Phase 3.3): the sequence bodies
  * below are that file's begin()/setClock()/wait_flag()/bus_recover()/
- * endTransmission()/requestFrom() master paths verbatim. Consumed by the CM7
- * TwoWire class and the CM4 gate images.
+ * endTransmission()/requestFrom() master paths verbatim. Phase 4.2 adds the
+ * slave init (slave_config/slave_enable), moved verbatim from
+ * TwoWire::begin(uint8_t); the slave ISR bodies stay per-consumer. Consumed
+ * by the CM7 TwoWire class and the CM4 gate images.
  *
  * Copyright (c) 2026 Nicholas Newdigate
  * SPDX-License-Identifier: MIT
@@ -156,4 +158,33 @@ uint32_t lpi2c1176_master_read(lpi2c1176_regs_t *p, uint8_t addr,
 		p->MSR = LPI2C1176_MSR_SDF | LPI2C1176_MSR_EPF;
 	}
 	return n;
+}
+
+void lpi2c1176_slave_config(lpi2c1176_regs_t *p, const lpi2c1176_hw_t *hw,
+                            uint8_t address)
+{
+	lpi2c1176_clocks_pins(hw);
+	p->SCR = LPI2C1176_SCR_RST;
+	p->SCR = 0u;
+	p->SAMR = ((uint32_t)address << 1);
+	/* SAEN (7-bit address) | RXSTALL (bit1) | TXDSTALL (bit2): clock-stretch until
+	 * the ISR drains SRDR / fills STDR, so multi-byte reads/writes stay
+	 * byte-correct even when the master clocks faster than the ISR can refill. */
+	p->SCFGR1 = (1u << 9) | (1u << 2) | (1u << 1);
+	/* SCFGR2.CLKHOLD (bits[3:0]) sets the SCL hold time while stalling — MUST be
+	 * non-zero or TXDSTALL/RXSTALL never actually hold the clock, so the ISR
+	 * can't refill STDR/drain SRDR in time on multi-byte transfers. Max hold. */
+	p->SCFGR2 = 0x0000000Fu;
+	/* TDIE is essential: without it only the first read byte (which rides the
+	 * AVF interrupt) is served; bytes 2..N need a TDF interrupt each to refill
+	 * STDR.  BEIE|FEIE are essential for recovery: a glitch can latch FEF/BEF,
+	 * which corrupts the slave FIFO and wedges it into permanent address-NACK;
+	 * the ISR W1Cs them so the *next* transfer recovers cleanly. */
+	p->SIER = LPI2C1176_SIER_TDIE | LPI2C1176_SIER_RDIE | LPI2C1176_SIER_AVIE
+	        | LPI2C1176_SIER_SDIE | LPI2C1176_SIER_BEIE | LPI2C1176_SIER_FEIE;
+}
+
+void lpi2c1176_slave_enable(lpi2c1176_regs_t *p)
+{
+	p->SCR = LPI2C1176_SCR_SEN | LPI2C1176_SCR_FILTEN;
 }
