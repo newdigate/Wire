@@ -1,4 +1,4 @@
-/* lpi2c1176.h - shared LPI2C master register/clock core for the NXP MIMXRT1176.
+/* lpi2c1176.h - shared LPI2C register/clock core for the NXP MIMXRT1176.
  *
  * This project's HW-verified RT1176 LPI2C bring-up (WireIMXRT1176.cpp, MIT),
  * re-expressed as the single shared C core (Phase 3.3). Consumed by BOTH the

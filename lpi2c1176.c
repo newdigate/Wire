@@ -1,4 +1,4 @@
-/* lpi2c1176.c - shared LPI2C master register/clock core for the NXP MIMXRT1176.
+/* lpi2c1176.c - shared LPI2C register/clock core for the NXP MIMXRT1176.
  *
  * This project's HW-verified RT1176 LPI2C bring-up (WireIMXRT1176.cpp, MIT),
  * re-expressed as the single shared C core (Phase 3.3): the sequence bodies
@@ -167,8 +167,9 @@ void lpi2c1176_slave_config(lpi2c1176_regs_t *p, const lpi2c1176_hw_t *hw,
 	p->SCR = LPI2C1176_SCR_RST;
 	p->SCR = 0u;
 	p->SAMR = ((uint32_t)address << 1);
-	/* SAEN (7-bit address) | RXSTALL (bit1) | TXDSTALL (bit2): clock-stretch until
-	 * the ISR drains SRDR / fills STDR, so multi-byte reads/writes stay
+	/* SAEN (bit9, SMBus-alert match — kept as HW-verified; 7-bit address matching
+	 * itself is ADDRCFG=0 + SAMR) | RXSTALL (bit1) | TXDSTALL (bit2): clock-stretch
+	 * until the ISR drains SRDR / fills STDR, so multi-byte reads/writes stay
 	 * byte-correct even when the master clocks faster than the ISR can refill. */
 	p->SCFGR1 = (1u << 9) | (1u << 2) | (1u << 1);
 	/* SCFGR2.CLKHOLD (bits[3:0]) sets the SCL hold time while stalling — MUST be

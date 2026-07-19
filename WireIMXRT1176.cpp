@@ -42,13 +42,21 @@
 
 #include <stddef.h>
 
-// The shared C core's master overlay must equal the core header's.
+// The shared C core's overlay (master + slave) must equal the core header's.
 static_assert(offsetof(lpi2c1176_regs_t, MCR)    == offsetof(IMXRT_LPI2C_t, MCR),    "MCR");
 static_assert(offsetof(lpi2c1176_regs_t, MSR)    == offsetof(IMXRT_LPI2C_t, MSR),    "MSR");
 static_assert(offsetof(lpi2c1176_regs_t, MCFGR1) == offsetof(IMXRT_LPI2C_t, MCFGR1), "MCFGR1");
 static_assert(offsetof(lpi2c1176_regs_t, MCCR0)  == offsetof(IMXRT_LPI2C_t, MCCR0),  "MCCR0");
 static_assert(offsetof(lpi2c1176_regs_t, MTDR)   == offsetof(IMXRT_LPI2C_t, MTDR),   "MTDR");
 static_assert(offsetof(lpi2c1176_regs_t, MRDR)   == offsetof(IMXRT_LPI2C_t, MRDR),   "MRDR");
+static_assert(offsetof(lpi2c1176_regs_t, SCR)    == offsetof(IMXRT_LPI2C_t, SCR),    "SCR");
+static_assert(offsetof(lpi2c1176_regs_t, SSR)    == offsetof(IMXRT_LPI2C_t, SSR),    "SSR");
+static_assert(offsetof(lpi2c1176_regs_t, SIER)   == offsetof(IMXRT_LPI2C_t, SIER),   "SIER");
+static_assert(offsetof(lpi2c1176_regs_t, SCFGR1) == offsetof(IMXRT_LPI2C_t, SCFGR1), "SCFGR1");
+static_assert(offsetof(lpi2c1176_regs_t, SAMR)   == offsetof(IMXRT_LPI2C_t, SAMR),   "SAMR");
+static_assert(offsetof(lpi2c1176_regs_t, SASR)   == offsetof(IMXRT_LPI2C_t, SASR),   "SASR");
+static_assert(offsetof(lpi2c1176_regs_t, STDR)   == offsetof(IMXRT_LPI2C_t, STDR),   "STDR");
+static_assert(offsetof(lpi2c1176_regs_t, SRDR)   == offsetof(IMXRT_LPI2C_t, SRDR),   "SRDR");
 
 void TwoWire::begin() {
 	lpi2c1176_begin(mp(), &hardware.hw, clock_hz);
